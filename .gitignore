@@ -1,0 +1,10 @@
+# Per-host secrets and generated env — NEVER commit.
+.env
+
+# Generated/rollback artifacts
+install.log
+.image-digests/
+
+# Editor noise
+*.swp
+.DS_Store

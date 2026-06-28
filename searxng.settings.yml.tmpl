@@ -1,0 +1,17 @@
+# SearXNG settings. Rendered to ${DATA_ROOT}/searxng/settings.yml (generate-if-
+# absent). `use_default_settings: true` merges with the image defaults so this
+# stays small and version-robust.
+use_default_settings: true
+
+server:
+  # Required. Rendered from the generated SEARXNG_SECRET.
+  secret_key: "@@SEARXNG_SECRET@@"
+  limiter: false
+  image_proxy: true
+
+search:
+  # JSON is DISABLED by default — without it, programmatic callers (OpenClaw,
+  # Open WebUI web search) silently get nothing.
+  formats:
+    - html
+    - json

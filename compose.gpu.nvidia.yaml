@@ -1,0 +1,14 @@
+# NVIDIA overlay — requires the NVIDIA Container Toolkit on the host.
+# Applied by the installer when GPU_VENDOR=nvidia. Touches only Ollama.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${OLLAMA_GPU_COUNT:-all}
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility

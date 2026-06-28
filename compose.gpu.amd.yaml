@@ -1,0 +1,15 @@
+# AMD ROCm overlay — requires ROCm drivers + /dev/kfd, /dev/dri on the host.
+# Applied by the installer when GPU_VENDOR=amd. Swaps Ollama to the :rocm image.
+# ROCm support is uneven across consumer cards; some need HSA_OVERRIDE_GFX_VERSION
+# (set it in .env). This path is best-effort — check `docker logs ai-ollama`.
+services:
+  ollama:
+    image: ${OLLAMA_IMAGE_AMD:-ollama/ollama:rocm}
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+      - render
+    environment:
+      - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-}

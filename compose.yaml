@@ -1,0 +1,109 @@
+# Base stack. GPU acceleration for Ollama is layered via an overlay file
+# (compose.gpu.nvidia.yaml / compose.gpu.amd.yaml) selected by the installer.
+#
+# Exposure principle: only user-facing services publish host ports.
+#   open-webui  -> published (your UI; safe to reverse-proxy/tunnel, it has auth)
+#   openclaw    -> published on LAN ONLY. DO NOT put behind Cloudflare Tunnel.
+#   ollama / litellm / searxng -> internal to the bridge, reached by service name.
+# Ollama's API is UNAUTHENTICATED — never publish :11434.
+
+networks:
+  aistack:
+    driver: bridge
+
+services:
+  ollama:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    container_name: ai-ollama
+    restart: unless-stopped
+    networks: [aistack]
+    volumes:
+      - ${DATA_ROOT}/ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  litellm:
+    image: ${LITELLM_IMAGE:-ghcr.io/berriai/litellm:main-latest}
+    container_name: ai-litellm
+    restart: unless-stopped
+    networks: [aistack]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      # LiteLLM reads its master key from this env var directly — keeps the
+      # secret out of the config file.
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+    volumes:
+      - ${DATA_ROOT}/litellm/config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+
+  open-webui:
+    image: ${OPENWEBUI_IMAGE:-ghcr.io/open-webui/open-webui:main}
+    container_name: ai-open-webui
+    restart: unless-stopped
+    networks: [aistack]
+    depends_on:
+      - ollama
+      - litellm
+    ports:
+      - "${WEBUI_PORT:-8080}:8080"
+    environment:
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
+      # Native Ollama connection — this is what powers in-UI model pull/delete/switch.
+      - OLLAMA_BASE_URL=http://ollama:11434
+      # LiteLLM as an OpenAI-compatible connection so future cloud models appear
+      # in the same model dropdown.
+      - OPENAI_API_BASE_URL=http://litellm:4000/v1
+      - OPENAI_API_KEY=${LITELLM_MASTER_KEY}
+      # Web search via the local SearXNG (verify var names against your Open WebUI
+      # version if search misbehaves).
+      - ENABLE_RAG_WEB_SEARCH=true
+      - RAG_WEB_SEARCH_ENGINE=searxng
+      - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>&format=json
+    volumes:
+      - ${DATA_ROOT}/open-webui:/app/backend/data
+
+  searxng:
+    image: ${SEARXNG_IMAGE:-searxng/searxng:latest}
+    container_name: ai-searxng
+    restart: unless-stopped
+    networks: [aistack]
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+    volumes:
+      - ${DATA_ROOT}/searxng:/etc/searxng:ro
+
+  openclaw:
+    image: ${OPENCLAW_IMAGE:-openclaw/openclaw:latest}
+    container_name: ai-openclaw
+    restart: unless-stopped
+    networks: [aistack]
+    depends_on:
+      - litellm
+    ports:
+      # LAN-ONLY control UI. Never expose this to WAN.
+      - "${OPENCLAW_PORT:-18789}:18789"
+    environment:
+      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}
+    volumes:
+      - ${DATA_ROOT}/openclaw:/home/node/.openclaw
+    labels:
+      # Excluded from Watchtower auto-update — bump it deliberately via
+      # `./install.sh update` so you're present when an agent with OS access changes.
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  watchtower:
+    image: ${WATCHTOWER_IMAGE:-containrrr/watchtower:latest}
+    container_name: ai-watchtower
+    restart: unless-stopped
+    networks: [aistack]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_SCHEDULE=${WATCHTOWER_SCHEDULE:-0 0 4 * * *}

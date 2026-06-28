@@ -1,0 +1,25 @@
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "litellm": {
+        "baseUrl": "http://litellm:4000/v1",
+        "apiKey": "@@LITELLM_MASTER_KEY@@",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "@@DEFAULT_MODEL@@",
+            "name": "@@DEFAULT_MODEL@@ (local via LiteLLM)",
+            "contextWindow": 32768,
+            "maxTokens": 4096
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": { "primary": "litellm/@@DEFAULT_MODEL@@" }
+    }
+  }
+}

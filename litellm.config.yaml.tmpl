@@ -1,0 +1,16 @@
+# LiteLLM gateway config. Rendered to ${DATA_ROOT}/litellm/config.yaml (generate-
+# if-absent — your edits survive reruns). Master key comes from the
+# LITELLM_MASTER_KEY env var, not this file.
+#
+# Wildcard passthrough: any model you pull in Open WebUI is reachable through the
+# gateway as ollama/<name> with no config change. OpenClaw targets one explicit
+# model id (see openclaw.json) because it requires an allowlisted model.
+model_list:
+  - model_name: "*"
+    litellm_params:
+      model: "ollama_chat/*"
+      api_base: "http://ollama:11434"
+
+litellm_settings:
+  drop_params: true
+  request_timeout: 600
