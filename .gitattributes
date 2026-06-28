@@ -1,6 +1,6 @@
-# Normalize to LF in the repo; these run on Linux.
+# These run on Linux — keep LF in the repo regardless of anyone's autocrlf.
 * text=auto eol=lf
-*.sh text eol=lf
-*.yaml text eol=lf
-*.yml text eol=lf
-*.tmpl text eol=lf
+*.sh    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.tmpl  text eol=lf

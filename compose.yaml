@@ -79,7 +79,7 @@ services:
       - ${DATA_ROOT}/searxng:/etc/searxng:ro
 
   openclaw:
-    image: ${OPENCLAW_IMAGE:-openclaw/openclaw:latest}
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
     container_name: ai-openclaw
     restart: unless-stopped
     networks: [aistack]
@@ -90,6 +90,9 @@ services:
       - "${OPENCLAW_PORT:-18789}:18789"
     environment:
       - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}
+      # Bind to all interfaces inside the container, or the published port can't
+      # reach the gateway (it defaults to 127.0.0.1).
+      - OPENCLAW_GATEWAY_BIND=0.0.0.0
     volumes:
       - ${DATA_ROOT}/openclaw:/home/node/.openclaw
     labels:
@@ -98,7 +101,7 @@ services:
       - "com.centurylinklabs.watchtower.enable=false"
 
   watchtower:
-    image: ${WATCHTOWER_IMAGE:-containrrr/watchtower:latest}
+    image: ${WATCHTOWER_IMAGE:-nickfedor/watchtower:latest}
     container_name: ai-watchtower
     restart: unless-stopped
     networks: [aistack]

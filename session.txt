@@ -1,0 +1,105 @@
+SESSION SUMMARY — local-ai-stack
+Date: 2026-06-28 (Adelaide)
+Repo: github.com/alethio36/aistack   VM: Debian "nextcloud" @ 10.11.22.57 (CPU-only)
+
+================================================================================
+WHAT WAS BEING WORKED ON
+================================================================================
+Clone-and-run Docker Compose local AI stack:
+  Ollama -> LiteLLM -> Open WebUI + OpenClaw -> SearXNG
+with an idempotent install.sh that detects GPU, renders per-host config +
+secrets, sets bind-mount perms, prompts for Watchtower update frequency, and
+auto-updates via Watchtower. DATA_ROOT lives outside the clone.
+
+================================================================================
+CURRENT STATE
+================================================================================
+DONE / WORKING
+- Whole stack comes up: ai-ollama (healthy), ai-litellm, ai-open-webui,
+  ai-searxng, ai-watchtower, ai-openclaw (gateway healthy, 0 restarts, model
+  wired to LiteLLM).
+- Installer paths exercised on CPU host: GPU detect/prompt/probe (cpu branch),
+  generate-once secrets, atomic config render, Watchtower frequency prompt.
+
+FIXES APPLIED THIS SESSION (all reflected in the committed files)
+- init_env ended on a trailing `&&` test -> returned 1 -> set -e aborted.
+  Converted to if-blocks + explicit `return 0`.
+- Config render `sed > $dest` left a zero-byte file on failure (broke the
+  generate-if-absent check). Now atomic: mktemp + mv, and `[ -s ]` treats
+  empty files as needing render (self-heal). Also dies clearly if a template
+  is missing.
+- config/*.tmpl had to be moved under config/ (the file download flattened the
+  subdir). Templates now correctly under config/.
+- OpenClaw image: `openclaw/openclaw:latest` does NOT exist on Docker Hub.
+  Switched to the official GHCR image: ghcr.io/openclaw/openclaw:latest.
+- Added OPENCLAW_GATEWAY_BIND=0.0.0.0 (without it the published port resets —
+  gateway binds loopback inside the container).
+- Watchtower: containrrr/watchtower is ABANDONED and broke on newer Docker.
+  Switched to the maintained fork: nickfedor/watchtower:latest.
+  (Same com.centurylinklabs.watchtower.* label namespace — exclude label for
+  OpenClaw still works.)
+- OpenClaw crash-looped: "Gateway start blocked: existing config is missing
+  gateway.mode". Added "gateway": { "mode": "local" } to openclaw.json.tmpl.
+- Default model: qwen2.5:7b -> qwen2.5:1.5b (CPU-safe ~1 GB). README has a
+  sizing rule + tier table for going bigger on GPU/RAM.
+
+BLOCKED  <-- pick up here tomorrow
+- OpenClaw Control UI is NOT reachable over plain HTTP from a remote browser
+  (http://10.11.22.57:18789). Gateway is healthy and serving; the browser
+  WebSocket is rejected with:
+     code=1008 "control ui requires device identity (use HTTPS or localhost
+     secure context)"
+  This is a browser secure-context rule the UI enforces (HTTPS or true
+  localhost only).
+- gateway.controlUi.allowInsecureAuth=true WAS set and CONFIRMED loaded, but it
+  does NOT bypass the device-identity requirement on this image version
+  (OpenClaw 2026.6.10). The flag is ineffective here — deliberately LEFT OUT of
+  the committed template (it only adds a "dangerous config" warning for no gain).
+- 127.0.0.1 access is not available (headless VM; must use the VM IP).
+
+================================================================================
+NEXT STEPS — decision pending on how to reach the OpenClaw UI
+================================================================================
+Pick ONE:
+  A) Tailscale (recommended). Tailscale Serve gives an HTTPS tailnet origin
+     (https://<vm>.<tailnet>.ts.net), which satisfies the secure-context rule,
+     exposes nothing publicly, and matches the "OpenClaw LAN/VPN-only, never
+     WAN" stance. Fastest — no rewiring. OPEN Q: is Tailscale already in the
+     homelab?
+  B) Switch OpenClaw to the coollabsio/openclaw image. nginx fronts the gateway
+     with its own basic auth on :8080, sidestepping the device-identity wall,
+     and it is env-driven (no hand-seeded openclaw.json). COST: real compose
+     changes — /data mount, host port -> container 8080 (nginx) -> gateway
+     18789, provider wiring via env vars instead of JSON. More "correct" for an
+     unattended installer but more work.
+
+AFTER UI ACCESS WORKS
+- Pull qwen2.5:1.5b in Open WebUI (Settings -> Models), test chat.
+- Finish OpenClaw onboarding: add a messaging channel + pair it
+  (sudo docker exec -it ai-openclaw openclaw onboard --mode local).
+  Token login via URL fragment:
+     http://<host>:18789/#token=<OPENCLAW_GATEWAY_TOKEN from .env>
+- If OpenClaw should use 1.5b: set DEFAULT_MODEL=qwen2.5:1.5b in .env, delete
+  /opt/local-ai-stack/data/openclaw/openclaw.json, re-run ./install.sh to
+  re-render. (Current live config still pins qwen2.5:7b from earlier renders.)
+
+================================================================================
+KEY PATHS / FACTS
+================================================================================
+- VM clone:    ~/local-ai-stack
+- DATA_ROOT:   /opt/local-ai-stack/data   (models + rendered configs, outside clone)
+- Live OpenClaw config: /opt/local-ai-stack/data/openclaw/openclaw.json
+- docker requires sudo on this VM (user not in the docker group).
+- Exposure: only Open WebUI (8080) and OpenClaw (18789) publish ports.
+  OpenClaw is LAN-only — never put it behind the Cloudflare Tunnel.
+  Ollama / LiteLLM / SearXNG are internal to the bridge.
+- Recreate just OpenClaw after a config edit:
+     sudo docker compose --env-file .env -f compose.yaml up -d --force-recreate openclaw
+
+================================================================================
+OPEN QUESTIONS
+================================================================================
+- Tailscale already running in the homelab? (decides A vs B above)
+- OpenClaw is the one component fighting both "configure out of the box" and
+  plain-HTTP LAN access. If it keeps resisting, the env-driven coollabsio image
+  is the more robust home for it.
