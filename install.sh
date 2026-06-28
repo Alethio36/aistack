@@ -19,6 +19,7 @@ SUBCMD="install"
 ASSUME_YES=0
 FORCE_GPU=""
 CLI_DATA_ROOT=""
+FORCE_WT=""
 GPU_VENDOR=""
 GPU_INFO=""
 
@@ -46,6 +47,7 @@ Commands:
 Options:
   --gpu nvidia|amd|cpu   Skip detection and force acceleration mode
   --data-root PATH       Override DATA_ROOT (where models/data live)
+  --watchtower CRON      Set Watchtower schedule non-interactively (6-field cron)
   --yes, -y              Non-interactive (accept detected GPU; fail if none usable)
   -h, --help             This help
 EOF
@@ -188,8 +190,37 @@ init_env() {
   done
 
   # Persist GPU + optional data-root override.
-  [ -n "$GPU_VENDOR" ] && set_kv GPU_VENDOR "$GPU_VENDOR"
-  [ -n "$CLI_DATA_ROOT" ] && set_kv DATA_ROOT "$CLI_DATA_ROOT"
+  if [ -n "$GPU_VENDOR" ]; then set_kv GPU_VENDOR "$GPU_VENDOR"; fi
+  if [ -n "$CLI_DATA_ROOT" ]; then set_kv DATA_ROOT "$CLI_DATA_ROOT"; fi
+  return 0
+}
+
+# ── Watchtower auto-update frequency ────────────────────────────────────────
+# Writes a 6-field cron (sec min hour dom mon dow) to WATCHTOWER_SCHEDULE.
+choose_watchtower() {
+  # Non-interactive: honour --watchtower if given, else keep whatever is set.
+  if [ -n "$FORCE_WT" ]; then set_kv WATCHTOWER_SCHEDULE "\"$FORCE_WT\""; info "Watchtower schedule: $FORCE_WT"; return 0; fi
+  if [ "$ASSUME_YES" -eq 1 ] || [ ! -t 0 ]; then return 0; fi
+
+  printf '\nHow often should Watchtower auto-update images?\n'
+  printf '  1) Daily 04:00          (0 0 4 * * *)   [default]\n'
+  printf '  2) Every 6 hours        (0 0 */6 * * *)\n'
+  printf '  3) Weekly, Sun 04:00    (0 0 4 * * 0)\n'
+  printf '  4) Hourly               (0 0 * * * *)\n'
+  printf '  5) Custom 6-field cron\n'
+  printf 'Choose [1-5] (default 1): '
+  local c=""; read -r c || true
+  case "${c:-1}" in
+    1) set_kv WATCHTOWER_SCHEDULE '"0 0 4 * * *"' ;;
+    2) set_kv WATCHTOWER_SCHEDULE '"0 0 */6 * * *"' ;;
+    3) set_kv WATCHTOWER_SCHEDULE '"0 0 4 * * 0"' ;;
+    4) set_kv WATCHTOWER_SCHEDULE '"0 0 * * * *"' ;;
+    5) printf 'Enter 6-field cron (sec min hour dom mon dow): '
+       local cron=""; read -r cron || true
+       if [ -n "$cron" ]; then set_kv WATCHTOWER_SCHEDULE "\"$cron\""; else warn "Empty — keeping current schedule."; fi ;;
+    *) warn "Invalid choice — keeping current schedule." ;;
+  esac
+  ok "Watchtower schedule: $(get_kv WATCHTOWER_SCHEDULE)"
 }
 
 # ── config rendering (generate-if-absent) ───────────────────────────────────
@@ -204,11 +235,14 @@ render_configs() {
   install -d "$data_root/litellm" "$data_root/searxng" "$data_root/openclaw"
 
   _render() { # tmpl dest
-    if [ -f "$2" ]; then info "Keeping existing $(basename "$2") (not overwritten)."; return; fi
+    [ -f "$1" ] || die "Template not found: $1 — the .tmpl files must live under config/. Run from the repo root."
+    if [ -s "$2" ]; then info "Keeping existing $(basename "$2") (not overwritten)."; return; fi
+    local _tmp; _tmp="$(mktemp)"
     sed -e "s|@@LITELLM_MASTER_KEY@@|${lk}|g" \
         -e "s|@@SEARXNG_SECRET@@|${sx}|g" \
         -e "s|@@DEFAULT_MODEL@@|${dm}|g" \
-        "$1" > "$2"
+        "$1" > "$_tmp"
+    mv "$_tmp" "$2"
     ok "Rendered $(basename "$2")."
   }
   _render config/litellm.config.yaml.tmpl   "$data_root/litellm/config.yaml"
@@ -279,6 +313,7 @@ cmd_install() {
   preflight
   choose_gpu
   init_env
+  choose_watchtower
   probe_gpu
   render_configs
   setup_dirs
@@ -319,6 +354,7 @@ while [ $# -gt 0 ]; do
     install|update|down|status|logs|reconfigure-gpu) SUBCMD="$1"; shift ;;
     --gpu)        FORCE_GPU="${2:-}"; shift 2 ;;
     --data-root)  CLI_DATA_ROOT="${2:-}"; shift 2 ;;
+    --watchtower) FORCE_WT="${2:-}"; shift 2 ;;
     --yes|-y)     ASSUME_YES=1; shift ;;
     -h|--help)    usage; exit 0 ;;
     *) die "Unknown argument: $1 (see --help)" ;;
