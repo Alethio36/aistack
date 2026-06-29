@@ -1,0 +1,9 @@
+# Publishes OpenClaw directly on a host port (LAN-only, plain HTTP).
+# Used when PROXY_MODE = none. The web Control UI will NOT work over this plain
+# HTTP path from another machine (browser secure-context requirement) — onboard
+# via `./install.sh onboard` and operate via a messaging channel, or front it
+# with Traefik (PROXY_MODE=openclaw|all) for a working HTTPS dashboard.
+services:
+  openclaw:
+    ports:
+      - "${OPENCLAW_PORT:-18789}:18789"

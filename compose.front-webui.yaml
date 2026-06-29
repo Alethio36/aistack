@@ -1,0 +1,13 @@
+# Routes Open WebUI through Traefik over HTTPS on the wuisecure entrypoint.
+# Used when PROXY_MODE = all. Reach it at https://<host-ip>:${WEBUI_HTTPS_PORT}.
+services:
+  traefik:
+    ports:
+      - "${WEBUI_HTTPS_PORT:-8443}:8443"
+  open-webui:
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.webui.entrypoints=wuisecure"
+      - "traefik.http.routers.webui.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.webui.tls=true"
+      - "traefik.http.services.webui.loadbalancer.server.port=8080"

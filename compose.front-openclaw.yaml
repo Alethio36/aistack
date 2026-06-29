@@ -1,0 +1,16 @@
+# Routes OpenClaw through Traefik over HTTPS on the ocsecure entrypoint.
+# Used when PROXY_MODE = openclaw | all. This is what makes the Control UI work:
+# https://<host-ip>:${OPENCLAW_HTTPS_PORT} is a secure context.
+# The installer also writes gateway.trustedProxies + controlUi.allowedOrigins
+# into openclaw.json so the gateway trusts the proxied connection.
+services:
+  traefik:
+    ports:
+      - "${OPENCLAW_HTTPS_PORT:-18443}:18443"
+  openclaw:
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.openclaw.entrypoints=ocsecure"
+      - "traefik.http.routers.openclaw.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.openclaw.tls=true"
+      - "traefik.http.services.openclaw.loadbalancer.server.port=18789"

@@ -20,6 +20,8 @@ ASSUME_YES=0
 FORCE_GPU=""
 CLI_DATA_ROOT=""
 FORCE_WT=""
+FORCE_PROXY=""
+EXEC_ARGS=()
 GPU_VENDOR=""
 GPU_INFO=""
 
@@ -37,19 +39,28 @@ usage() {
 local-ai-stack installer
 
 Commands:
-  install            Detect GPU, configure, and start the stack (default)
+  install            Detect GPU, choose proxy mode, configure, and start (default)
   update             Record current image IDs, then pull+recreate (incl. OpenClaw)
   reconfigure-gpu    Re-detect/choose GPU and recreate Ollama
+  reconfigure-proxy  Change proxy mode (none/openclaw/all) and re-apply
+  exec [svc] [cmd]   Exec into a service (default: shell in the OpenClaw container)
+  onboard [args]     Run OpenClaw onboarding inside its container
   down               Stop the stack
   status             Show containers and check data-dir write permissions
   logs               Follow logs
 
 Options:
   --gpu nvidia|amd|cpu   Skip detection and force acceleration mode
+  --proxy none|openclaw|all  Set reverse-proxy mode non-interactively
   --data-root PATH       Override DATA_ROOT (where models/data live)
   --watchtower CRON      Set Watchtower schedule non-interactively (6-field cron)
-  --yes, -y              Non-interactive (accept detected GPU; fail if none usable)
+  --yes, -y              Non-interactive (accept detected/default choices)
   -h, --help             This help
+
+Examples:
+  sudo ./install.sh --proxy openclaw          # HTTPS dashboard for OpenClaw
+  sudo ./install.sh onboard                    # configure OpenClaw interactively
+  sudo ./install.sh exec openclaw models status
 EOF
 }
 
@@ -71,7 +82,7 @@ set_kv() {
   fi
 }
 
-# COMPOSE base command; GPU overlay appended by gpu_overlay()
+# COMPOSE base command; GPU + proxy overlays appended here.
 COMPOSE=()
 build_compose_cmd() {
   COMPOSE=(docker compose --env-file "$ENV_FILE" -f compose.yaml)
@@ -79,6 +90,16 @@ build_compose_cmd() {
     nvidia) COMPOSE+=(-f compose.gpu.nvidia.yaml) ;;
     amd)    COMPOSE+=(-f compose.gpu.amd.yaml) ;;
     *)      : ;;  # cpu / none / unset -> base only
+  esac
+  # Proxy overlays. Compose can't remove a published port via overlay, so the
+  # base publishes nothing user-facing and these add ports additively.
+  case "$(get_kv PROXY_MODE)" in
+    all)
+      COMPOSE+=(-f compose.proxy-base.yaml -f compose.front-webui.yaml -f compose.front-openclaw.yaml) ;;
+    openclaw)
+      COMPOSE+=(-f compose.proxy-base.yaml -f compose.front-openclaw.yaml -f compose.direct-webui.yaml) ;;
+    *)  # none / unset -> everything on direct plain-HTTP ports
+      COMPOSE+=(-f compose.direct-webui.yaml -f compose.direct-openclaw.yaml) ;;
   esac
 }
 dc() { "${COMPOSE[@]}" "$@"; }
@@ -223,6 +244,38 @@ choose_watchtower() {
   ok "Watchtower schedule: $(get_kv WATCHTOWER_SCHEDULE)"
 }
 
+# ── reverse proxy / TLS mode ────────────────────────────────────────────────
+# Writes PROXY_MODE = none | openclaw | all.
+#   none     : direct plain-HTTP ports. OpenClaw dashboard not usable over LAN.
+#   openclaw : Traefik fronts OpenClaw over self-signed HTTPS (dashboard works);
+#              Open WebUI stays on its direct port.
+#   all      : Traefik fronts OpenClaw + Open WebUI over HTTPS.
+choose_proxy() {
+  if [ -n "$FORCE_PROXY" ]; then
+    case "$FORCE_PROXY" in none|openclaw|all) set_kv PROXY_MODE "$FORCE_PROXY"; info "Proxy mode: $FORCE_PROXY"; return 0 ;;
+      *) die "--proxy must be none|openclaw|all" ;; esac
+  fi
+  if [ "$ASSUME_YES" -eq 1 ] || [ ! -t 0 ]; then
+    [ -n "$(get_kv PROXY_MODE)" ] || set_kv PROXY_MODE none
+    return 0
+  fi
+
+  printf '\nReverse proxy / TLS (Traefik, self-signed cert).\n'
+  printf 'The OpenClaw web dashboard needs an HTTPS "secure context"; Traefik provides it.\n'
+  printf '  1) None — direct plain-HTTP ports. OpenClaw dashboard via CLI/tunnel only.\n'
+  printf '  2) Traefik for OpenClaw only — HTTPS dashboard; Open WebUI stays direct. [default]\n'
+  printf '  3) Traefik for OpenClaw + Open WebUI — both over HTTPS.\n'
+  printf 'Choose [1-3] (default 2): '
+  local c=""; read -r c || true
+  case "${c:-2}" in
+    1) set_kv PROXY_MODE none ;;
+    2) set_kv PROXY_MODE openclaw ;;
+    3) set_kv PROXY_MODE all ;;
+    *) warn "Invalid choice — defaulting to OpenClaw-only."; set_kv PROXY_MODE openclaw ;;
+  esac
+  ok "Proxy mode: $(get_kv PROXY_MODE)"
+}
+
 # ── config rendering (generate-if-absent) ───────────────────────────────────
 render_configs() {
   local data_root lk sx dm
@@ -248,6 +301,35 @@ render_configs() {
   _render config/litellm.config.yaml.tmpl   "$data_root/litellm/config.yaml"
   _render config/searxng.settings.yml.tmpl  "$data_root/searxng/settings.yml"
   _render config/openclaw.json.tmpl         "$data_root/openclaw/openclaw.json"
+
+  patch_openclaw_proxy "$data_root/openclaw/openclaw.json"
+}
+
+# When Traefik fronts OpenClaw, the gateway sits behind a reverse proxy and must
+# (a) trust the proxy's forwarded headers and (b) allow the HTTPS origin the
+# browser uses. Adds these to openclaw.json without clobbering existing values.
+patch_openclaw_proxy() {
+  local cfg="$1" mode host port origin
+  mode="$(get_kv PROXY_MODE)"
+  case "$mode" in openclaw|all) : ;; *) return 0 ;; esac
+  port="$(get_kv OPENCLAW_HTTPS_PORT)"; port="${port:-18443}"
+  host="$(hostname -I 2>/dev/null | awk '{print $1}')"; host="${host:-127.0.0.1}"
+  origin="https://${host}:${port}"
+  ORIGIN="$origin" python3 - "$cfg" <<'PY' || warn "Could not patch openclaw.json for proxy; set gateway.trustedProxies/allowedOrigins manually."
+import json, os, sys
+p = sys.argv[1]; origin = os.environ["ORIGIN"]
+c = json.load(open(p))
+g = c.setdefault("gateway", {})
+# Trust the Docker bridge range (Traefik reaches the gateway from there).
+g.setdefault("trustedProxies", ["172.16.0.0/12"])
+cu = g.setdefault("controlUi", {})
+ao = cu.setdefault("allowedOrigins", [])
+if origin not in ao:
+    ao.append(origin)
+json.dump(c, open(p, "w"), indent=2)
+print("patched openclaw.json proxy fields:", origin)
+PY
+  ok "OpenClaw proxy fields set (origin ${origin})."
 }
 
 # ── bind-mount dirs + permissions ───────────────────────────────────────────
@@ -284,26 +366,45 @@ verify_perms() {
 }
 
 print_summary() {
-  local wp op dm
-  wp="$(get_kv WEBUI_PORT)"; op="$(get_kv OPENCLAW_PORT)"; dm="$(get_kv DEFAULT_MODEL)"
-  local host; host="$(hostname -I 2>/dev/null | awk '{print $1}')"; host="${host:-<this-host>}"
+  local dm mode host wp op whttps ohttps
+  dm="$(get_kv DEFAULT_MODEL)"; mode="$(get_kv PROXY_MODE)"; mode="${mode:-none}"
+  wp="$(get_kv WEBUI_PORT)"; wp="${wp:-8080}"
+  op="$(get_kv OPENCLAW_PORT)"; op="${op:-18789}"
+  whttps="$(get_kv WEBUI_HTTPS_PORT)"; whttps="${whttps:-8443}"
+  ohttps="$(get_kv OPENCLAW_HTTPS_PORT)"; ohttps="${ohttps:-18443}"
+  host="$(hostname -I 2>/dev/null | awk '{print $1}')"; host="${host:-<this-host>}"
+
+  local webui_url openclaw_line
+  case "$mode" in
+    all)      webui_url="https://${host}:${whttps}  (self-signed cert — accept the warning)" ;;
+    *)        webui_url="http://${host}:${wp}" ;;
+  esac
+  case "$mode" in
+    openclaw|all) openclaw_line="https://${host}:${ohttps}  (self-signed cert — dashboard works here)" ;;
+    *)            openclaw_line="http://${host}:${op}  (LAN only; dashboard NOT usable over plain HTTP — onboard via CLI)" ;;
+  esac
+
   cat <<EOF | tee -a "$LOG"
 
 ──────────────────────────────────────────────────────────────────────────────
-Stack is up.
+Stack is up.  (proxy mode: ${mode})
 
-  Open WebUI : http://${host}:${wp:-8080}        (create the admin user on first load)
-  OpenClaw   : http://${host}:${op:-18789}       (LAN ONLY — do not tunnel this)
+  Open WebUI : ${webui_url}
+               create the admin user on first load
+  OpenClaw   : ${openclaw_line}
 
 Next steps:
-  1. In Open WebUI, pull a model: Settings -> Models -> pull '${dm:-qwen2.5:7b}'
+  1. In Open WebUI, pull a model: Settings -> Models -> pull '${dm:-qwen2.5:1.5b}'
      (Ollama/LiteLLM/OpenClaw are pre-wired to use it once it exists.)
-  2. Finish OpenClaw setup via its own onboarding (model provider already points
-     at LiteLLM in openclaw.json; you still add a messaging channel + pair it):
-       docker exec -it ai-openclaw openclaw onboard      # or: openclaw doctor
-  3. Verify OpenClaw's model route:  docker exec -it ai-openclaw openclaw models status
+  2. Onboard OpenClaw (add a messaging channel + pair it):
+       sudo ./install.sh onboard
+     Token login for the dashboard (append as URL fragment):
+       <openclaw-url>/#token=$(get_kv OPENCLAW_GATEWAY_TOKEN)
+  3. Open a shell / run any OpenClaw command:
+       sudo ./install.sh exec                 # shell in the OpenClaw container
+       sudo ./install.sh exec openclaw models status
 
-Update later:   sudo ./install.sh update     Stop:  sudo ./install.sh down
+Update:  sudo ./install.sh update     Stop:  sudo ./install.sh down
 ──────────────────────────────────────────────────────────────────────────────
 EOF
 }
@@ -314,6 +415,7 @@ cmd_install() {
   choose_gpu
   init_env
   choose_watchtower
+  choose_proxy
   probe_gpu
   render_configs
   setup_dirs
@@ -344,6 +446,42 @@ cmd_reconfigure_gpu() {
   ok "Done."
 }
 
+cmd_reconfigure_proxy() {
+  preflight; init_env; choose_proxy
+  # refresh OpenClaw proxy fields for the new mode, then recreate affected services
+  local data_root; data_root="$(get_kv DATA_ROOT)"; data_root="${data_root%/}"
+  patch_openclaw_proxy "$data_root/openclaw/openclaw.json"
+  build_compose_cmd
+  info "Applying proxy mode: $(get_kv PROXY_MODE)…"
+  dc up -d --remove-orphans
+  ok "Done. (If OpenClaw's allowedOrigins changed, give it a moment to restart.)"
+}
+
+# exec into a service. Usage: install.sh exec [service] [cmd...]
+# Defaults to an interactive shell in the OpenClaw container.
+cmd_exec() {
+  preflight; init_env; build_compose_cmd
+  local svc="openclaw"
+  if [ "${#EXEC_ARGS[@]}" -gt 0 ]; then svc="${EXEC_ARGS[0]}"; EXEC_ARGS=("${EXEC_ARGS[@]:1}"); fi
+  if [ "${#EXEC_ARGS[@]}" -gt 0 ]; then
+    dc exec "$svc" "${EXEC_ARGS[@]}"
+  else
+    info "Opening a shell in '$svc' (Ctrl-D to exit)…"
+    dc exec "$svc" bash 2>/dev/null || dc exec "$svc" sh
+  fi
+}
+
+# Convenience: run OpenClaw's onboarding inside its container.
+cmd_onboard() {
+  preflight; init_env; build_compose_cmd
+  info "Launching OpenClaw onboarding (Ctrl-C to abort)…"
+  if [ "${#EXEC_ARGS[@]}" -gt 0 ]; then
+    dc exec openclaw openclaw onboard "${EXEC_ARGS[@]}"
+  else
+    dc exec openclaw openclaw onboard --mode local
+  fi
+}
+
 cmd_down()   { preflight; init_env; build_compose_cmd; dc down; ok "Stopped."; }
 cmd_logs()   { preflight; init_env; build_compose_cmd; dc logs -f; }
 cmd_status() { preflight; init_env; build_compose_cmd; dc ps; echo; verify_perms; }
@@ -351,10 +489,14 @@ cmd_status() { preflight; init_env; build_compose_cmd; dc ps; echo; verify_perms
 # ── arg parsing + dispatch ──────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
   case "$1" in
-    install|update|down|status|logs|reconfigure-gpu) SUBCMD="$1"; shift ;;
+    install|update|down|status|logs|reconfigure-gpu|reconfigure-proxy)
+      SUBCMD="$1"; shift ;;
+    exec|onboard)
+      SUBCMD="$1"; shift; EXEC_ARGS=("$@"); break ;;   # rest is verbatim service/cmd
     --gpu)        FORCE_GPU="${2:-}"; shift 2 ;;
     --data-root)  CLI_DATA_ROOT="${2:-}"; shift 2 ;;
     --watchtower) FORCE_WT="${2:-}"; shift 2 ;;
+    --proxy)      FORCE_PROXY="${2:-}"; shift 2 ;;
     --yes|-y)     ASSUME_YES=1; shift ;;
     -h|--help)    usage; exit 0 ;;
     *) die "Unknown argument: $1 (see --help)" ;;
@@ -363,10 +505,13 @@ done
 
 : > "$LOG" 2>/dev/null || true
 case "$SUBCMD" in
-  install)         cmd_install ;;
-  update)          cmd_update ;;
-  reconfigure-gpu) cmd_reconfigure_gpu ;;
-  down)            cmd_down ;;
-  logs)            cmd_logs ;;
-  status)          cmd_status ;;
+  install)          cmd_install ;;
+  update)           cmd_update ;;
+  reconfigure-gpu)  cmd_reconfigure_gpu ;;
+  reconfigure-proxy) cmd_reconfigure_proxy ;;
+  exec)             cmd_exec ;;
+  onboard)          cmd_onboard ;;
+  down)             cmd_down ;;
+  logs)             cmd_logs ;;
+  status)           cmd_status ;;
 esac

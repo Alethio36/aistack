@@ -1,0 +1,27 @@
+# Traefik reverse proxy with self-signed TLS (Traefik's default certificate).
+# Provides the HTTPS "secure context" the OpenClaw Control UI requires, with no
+# external DNS, domain, or cert authority — works on a clean box by raw IP.
+#
+# Each fronted service gets its own HTTPS entrypoint/port (no DNS/Host rules
+# needed): wuisecure for Open WebUI, ocsecure for OpenClaw. The host port for an
+# entrypoint is published by the matching front-*.yaml overlay, so unused
+# entrypoints aren't bound.
+#
+# Browsers show a one-time "not trusted" warning for the self-signed cert; accept
+# it (or trust Traefik's cert) — it's still a real HTTPS secure context.
+services:
+  traefik:
+    image: ${TRAEFIK_IMAGE:-traefik:v3}
+    container_name: ai-traefik
+    restart: unless-stopped
+    networks: [aistack]
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedByDefault=false
+      - --entryPoints.wuisecure.address=:8443
+      - --entryPoints.ocsecure.address=:18443
+      - --log.level=INFO
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"

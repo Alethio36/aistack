@@ -1,105 +1,82 @@
 SESSION SUMMARY — local-ai-stack
-Date: 2026-06-28 (Adelaide)
-Repo: github.com/alethio36/aistack   VM: Debian "nextcloud" @ 10.11.22.57 (CPU-only)
+Updated: 2026-06-28 (Adelaide)
+Repo: github.com/alethio36/aistack
 
 ================================================================================
-WHAT WAS BEING WORKED ON
+WHAT THIS IS
 ================================================================================
 Clone-and-run Docker Compose local AI stack:
-  Ollama -> LiteLLM -> Open WebUI + OpenClaw -> SearXNG
-with an idempotent install.sh that detects GPU, renders per-host config +
-secrets, sets bind-mount perms, prompts for Watchtower update frequency, and
-auto-updates via Watchtower. DATA_ROOT lives outside the clone.
+  Ollama -> LiteLLM -> Open WebUI + OpenClaw -> SearXNG, optional Traefik proxy.
+Idempotent install.sh: detects GPU, picks proxy/TLS mode, renders per-host config
++ secrets, sets bind-mount perms, prompts Watchtower frequency, auto-updates.
+Built to run on CLEAN hosts with no pre-existing infrastructure.
 
 ================================================================================
 CURRENT STATE
 ================================================================================
-DONE / WORKING
-- Whole stack comes up: ai-ollama (healthy), ai-litellm, ai-open-webui,
-  ai-searxng, ai-watchtower, ai-openclaw (gateway healthy, 0 restarts, model
-  wired to LiteLLM).
-- Installer paths exercised on CPU host: GPU detect/prompt/probe (cpu branch),
-  generate-once secrets, atomic config render, Watchtower frequency prompt.
+WORKING
+- Full stack comes up. Tested on the CPU-only Debian VM @ 10.11.22.57.
+- Installer flow: GPU detect/prompt/probe, generate-once secrets, atomic render,
+  Watchtower frequency prompt, proxy-mode prompt, exec/onboard helpers.
 
-FIXES APPLIED THIS SESSION (all reflected in the committed files)
-- init_env ended on a trailing `&&` test -> returned 1 -> set -e aborted.
-  Converted to if-blocks + explicit `return 0`.
-- Config render `sed > $dest` left a zero-byte file on failure (broke the
-  generate-if-absent check). Now atomic: mktemp + mv, and `[ -s ]` treats
-  empty files as needing render (self-heal). Also dies clearly if a template
-  is missing.
-- config/*.tmpl had to be moved under config/ (the file download flattened the
-  subdir). Templates now correctly under config/.
-- OpenClaw image: `openclaw/openclaw:latest` does NOT exist on Docker Hub.
-  Switched to the official GHCR image: ghcr.io/openclaw/openclaw:latest.
-- Added OPENCLAW_GATEWAY_BIND=0.0.0.0 (without it the published port resets —
-  gateway binds loopback inside the container).
-- Watchtower: containrrr/watchtower is ABANDONED and broke on newer Docker.
-  Switched to the maintained fork: nickfedor/watchtower:latest.
-  (Same com.centurylinklabs.watchtower.* label namespace — exclude label for
-  OpenClaw still works.)
-- OpenClaw crash-looped: "Gateway start blocked: existing config is missing
-  gateway.mode". Added "gateway": { "mode": "local" } to openclaw.json.tmpl.
-- Default model: qwen2.5:7b -> qwen2.5:1.5b (CPU-safe ~1 GB). README has a
-  sizing rule + tier table for going bigger on GPU/RAM.
+RESOLVED THIS SESSION (was the big blocker)
+- OpenClaw Control UI would not load over plain HTTP from a remote browser
+  (browser secure-context rule; allowInsecureAuth / dangerouslyDisableDeviceAuth
+  are BOTH ineffective for remote LAN HTTP — confirmed against the OpenClaw bug
+  tracker). Fix = provide a real HTTPS secure context, self-contained:
+  -> Bundled Traefik with a self-signed cert (Traefik default TLS). No external
+     DNS / domain / CA needed; works by raw IP. Each fronted service gets its own
+     HTTPS entrypoint/port (no Host rules), so it's portable to any clean box.
 
-BLOCKED  <-- pick up here tomorrow
-- OpenClaw Control UI is NOT reachable over plain HTTP from a remote browser
-  (http://10.11.22.57:18789). Gateway is healthy and serving; the browser
-  WebSocket is rejected with:
-     code=1008 "control ui requires device identity (use HTTPS or localhost
-     secure context)"
-  This is a browser secure-context rule the UI enforces (HTTPS or true
-  localhost only).
-- gateway.controlUi.allowInsecureAuth=true WAS set and CONFIRMED loaded, but it
-  does NOT bypass the device-identity requirement on this image version
-  (OpenClaw 2026.6.10). The flag is ineffective here — deliberately LEFT OUT of
-  the committed template (it only adds a "dangerous config" warning for no gain).
-- 127.0.0.1 access is not available (headless VM; must use the VM IP).
+KEY DESIGN DECISIONS
+- Earlier homelab-specific fix (Caddy LXC + *.true-frontier.com wildcard +
+  split-horizon DNS) was REJECTED — stack must not assume host infra. Traefik-
+  in-stack with self-signed TLS is the portable replacement.
+- Base compose publishes NO user-facing ports; overlays add them (Compose can't
+  remove a port via overlay, so ports must be additive). Overlays:
+    compose.direct-webui / direct-openclaw  (plain HTTP)
+    compose.proxy-base                       (Traefik service)
+    compose.front-webui / front-openclaw     (Traefik HTTPS routers + ports)
+- PROXY_MODE = none | openclaw | all  (installer prompt, --proxy flag, or
+  reconfigure-proxy). openclaw mode = HTTPS dashboard for OpenClaw, WebUI direct.
+
+ALL EARLIER FIXES (still in the files)
+- set -e abort in init_env (trailing &&) -> if-blocks
+- render sed left zero-byte files -> atomic mktemp+mv + [-s] + template check
+- config/*.tmpl under config/ (download had flattened it)
+- OpenClaw image -> ghcr.io/openclaw/openclaw:latest (the Docker Hub one is fake)
+- OPENCLAW_GATEWAY_BIND=0.0.0.0
+- gateway.mode=local in openclaw.json.tmpl (gateway refused to start without it)
+- Watchtower -> nickfedor/watchtower:latest (containrrr abandoned/broke)
+- default model -> qwen2.5:1.5b (CPU-safe) + README sizing guide
 
 ================================================================================
-NEXT STEPS — decision pending on how to reach the OpenClaw UI
+NEXT STEPS
 ================================================================================
-Pick ONE:
-  A) Tailscale (recommended). Tailscale Serve gives an HTTPS tailnet origin
-     (https://<vm>.<tailnet>.ts.net), which satisfies the secure-context rule,
-     exposes nothing publicly, and matches the "OpenClaw LAN/VPN-only, never
-     WAN" stance. Fastest — no rewiring. OPEN Q: is Tailscale already in the
-     homelab?
-  B) Switch OpenClaw to the coollabsio/openclaw image. nginx fronts the gateway
-     with its own basic auth on :8080, sidestepping the device-identity wall,
-     and it is env-driven (no hand-seeded openclaw.json). COST: real compose
-     changes — /data mount, host port -> container 8080 (nginx) -> gateway
-     18789, provider wiring via env vars instead of JSON. More "correct" for an
-     unattended installer but more work.
+1. Push these files; on the VM, sync and re-run with a proxy mode:
+     git fetch origin && git reset --hard origin/main   # .env is gitignored, survives
+     chmod +x install.sh
+     sudo ./install.sh --proxy openclaw                  # or run interactive
+   Then open  https://10.11.22.57:18443/#token=<OPENCLAW_GATEWAY_TOKEN from .env>
+   (accept the self-signed cert warning once).  <-- this is the previously-broken
+   dashboard; verify it actually loads now.
+2. Pull qwen2.5:1.5b in Open WebUI (Settings -> Models), test chat.
+3. Onboard OpenClaw:  sudo ./install.sh onboard   (add messaging channel + pair)
+   Verify model route: sudo ./install.sh exec openclaw models status
 
-AFTER UI ACCESS WORKS
-- Pull qwen2.5:1.5b in Open WebUI (Settings -> Models), test chat.
-- Finish OpenClaw onboarding: add a messaging channel + pair it
-  (sudo docker exec -it ai-openclaw openclaw onboard --mode local).
-  Token login via URL fragment:
-     http://<host>:18789/#token=<OPENCLAW_GATEWAY_TOKEN from .env>
-- If OpenClaw should use 1.5b: set DEFAULT_MODEL=qwen2.5:1.5b in .env, delete
-  /opt/local-ai-stack/data/openclaw/openclaw.json, re-run ./install.sh to
-  re-render. (Current live config still pins qwen2.5:7b from earlier renders.)
+OPEN / TO VERIFY
+- traefik:v3 tag pulls cleanly (floating major tag — pin a minor in .env if not).
+- The self-signed-HTTPS path genuinely satisfies OpenClaw's secure-context check
+  end to end (logic is sound from the bug tracker; confirm live).
+- trustedProxies default is 172.16.0.0/12 (Docker bridge range). If OpenClaw
+  still flags the proxied connection as remote, narrow/adjust to the actual
+  bridge subnet (docker network inspect ai-stack_aistack).
 
 ================================================================================
 KEY PATHS / FACTS
 ================================================================================
-- VM clone:    ~/local-ai-stack
-- DATA_ROOT:   /opt/local-ai-stack/data   (models + rendered configs, outside clone)
+- VM clone: ~/local-ai-stack   DATA_ROOT: /opt/local-ai-stack/data (outside clone)
 - Live OpenClaw config: /opt/local-ai-stack/data/openclaw/openclaw.json
-- docker requires sudo on this VM (user not in the docker group).
-- Exposure: only Open WebUI (8080) and OpenClaw (18789) publish ports.
-  OpenClaw is LAN-only — never put it behind the Cloudflare Tunnel.
-  Ollama / LiteLLM / SearXNG are internal to the bridge.
-- Recreate just OpenClaw after a config edit:
-     sudo docker compose --env-file .env -f compose.yaml up -d --force-recreate openclaw
-
-================================================================================
-OPEN QUESTIONS
-================================================================================
-- Tailscale already running in the homelab? (decides A vs B above)
-- OpenClaw is the one component fighting both "configure out of the box" and
-  plain-HTTP LAN access. If it keeps resisting, the env-driven coollabsio image
-  is the more robust home for it.
+- docker needs sudo on this VM (user not in docker group).
+- Recreate one service: sudo docker compose --env-file .env -f compose.yaml [overlays] up -d --force-recreate <svc>
+- Helpers: ./install.sh exec [svc] [cmd] ;  ./install.sh onboard ;  ./install.sh reconfigure-proxy

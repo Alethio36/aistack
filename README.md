@@ -61,20 +61,56 @@ exposes a chat API and cannot pull/delete models, so that path stays direct.
 OpenClaw goes **through LiteLLM** so the agent's usage hits the gateway (budgets,
 logging, future providers).
 
-## Exposure — only two services publish ports
+## Exposure & the reverse proxy
 
-| Service    | Port  | Exposure |
-|------------|-------|----------|
-| Open WebUI | 8080  | Yours. Safe to reverse-proxy / Cloudflare Tunnel (it has auth). |
-| OpenClaw   | 18789 | **LAN only. Never tunnel.** It runs shell commands with OS access; community skills are a prompt-injection / supply-chain surface. Reach it remotely over a VPN, or drive it via an outbound messaging channel (Telegram/Discord). |
-| Ollama     | —     | Internal only. Its API is **unauthenticated** — never publish 11434. |
-| LiteLLM    | —     | Internal only. |
-| SearXNG    | —     | Internal only. |
+Only user-facing services publish host ports; everything else is internal to the
+Docker bridge and reached by service name.
+
+| Service    | Exposure |
+|------------|----------|
+| Open WebUI | Yours. Plain HTTP on `WEBUI_PORT` (8080), or HTTPS via Traefik. Has auth — safe to reverse-proxy. |
+| OpenClaw   | **LAN only. Never tunnel to WAN.** Runs shell commands with OS access; community skills are a prompt-injection / supply-chain surface. |
+| Ollama     | Internal only. API is **unauthenticated** — never publish 11434. |
+| LiteLLM    | Internal only. |
+| SearXNG    | Internal only. |
+| Traefik    | Only when a proxy mode is selected; publishes the HTTPS port(s). |
+
+**The OpenClaw dashboard requires HTTPS.** Its Control UI refuses plain-HTTP
+connections from any non-localhost browser (a browser secure-context rule —
+`allowInsecureAuth` / `dangerouslyDisableDeviceAuth` do **not** override it). So
+the installer offers a bundled **Traefik** proxy with a self-signed cert to
+provide that secure context, with no external DNS, domain, or CA — it works on a
+clean box by raw IP. Pick a mode at install (or `--proxy`, or `reconfigure-proxy`):
+
+| `PROXY_MODE` | OpenClaw | Open WebUI |
+|--------------|----------|------------|
+| `none`       | plain HTTP on 18789 (dashboard unusable remotely — onboard via CLI) | plain HTTP on 8080 |
+| `openclaw`   | **HTTPS** via Traefik on `OPENCLAW_HTTPS_PORT` (18443) — dashboard works | plain HTTP on 8080 |
+| `all`        | HTTPS on 18443 | HTTPS on `WEBUI_HTTPS_PORT` (8443) |
+
+Self-signed means a one-time browser "not trusted" warning — accept it (or trust
+Traefik's cert); it's still a real HTTPS secure context. When Traefik fronts
+OpenClaw, the installer writes `gateway.trustedProxies` and
+`controlUi.allowedOrigins` into `openclaw.json` so the gateway accepts the
+proxied connection. Dashboard login uses the gateway token as a URL fragment:
+`https://<host>:18443/#token=<OPENCLAW_GATEWAY_TOKEN>`.
 
 **Blast-radius note:** LAN-only limits *inbound* to OpenClaw, not what it can
 *reach outbound*. On a flat LAN a compromised skill can hit everything on the
 subnet. If you care, put the host (or OpenClaw) on its own VLAN with inter-VLAN
 deny rules. Otherwise: vet skills, grant least capability.
+
+## Onboarding / running commands in OpenClaw
+
+OpenClaw needs a one-time interactive setup (model provider is pre-wired to
+LiteLLM, but you add a messaging channel and pair it). The installer wraps this:
+
+```bash
+sudo ./install.sh onboard                    # openclaw onboard --mode local
+sudo ./install.sh exec                       # interactive shell in the container
+sudo ./install.sh exec openclaw models status
+sudo ./install.sh exec openclaw doctor
+```
 
 ## GPU — host prerequisites (you install these; the script won't)
 
@@ -144,6 +180,9 @@ your models.
 sudo ./install.sh                  # install / reconfigure
 sudo ./install.sh update           # pull latest + recreate (incl. OpenClaw)
 sudo ./install.sh reconfigure-gpu  # re-detect/choose GPU, recreate Ollama
+sudo ./install.sh reconfigure-proxy # change proxy mode (none/openclaw/all)
+sudo ./install.sh onboard          # OpenClaw onboarding
+sudo ./install.sh exec [svc] [cmd] # shell/exec in a container (default: openclaw)
 sudo ./install.sh status           # containers + data-dir write check
 sudo ./install.sh logs             # follow logs
 sudo ./install.sh down             # stop

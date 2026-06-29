@@ -50,8 +50,8 @@ services:
     depends_on:
       - ollama
       - litellm
-    ports:
-      - "${WEBUI_PORT:-8080}:8080"
+    # No host port here — an overlay publishes it (compose.direct-webui.yaml) or
+    # Traefik fronts it (compose.front-webui.yaml). The installer selects which.
     environment:
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
       # Native Ollama connection — this is what powers in-UI model pull/delete/switch.
@@ -85,13 +85,13 @@ services:
     networks: [aistack]
     depends_on:
       - litellm
-    ports:
-      # LAN-ONLY control UI. Never expose this to WAN.
-      - "${OPENCLAW_PORT:-18789}:18789"
+    # No host port here — an overlay publishes it (compose.direct-openclaw.yaml,
+    # LAN-only plain HTTP) or Traefik fronts it over HTTPS so the Control UI's
+    # secure-context requirement is satisfied (compose.front-openclaw.yaml).
     environment:
       - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}
-      # Bind to all interfaces inside the container, or the published port can't
-      # reach the gateway (it defaults to 127.0.0.1).
+      # Bind to all interfaces inside the container so Traefik (or the published
+      # port) can reach the gateway; it defaults to 127.0.0.1 otherwise.
       - OPENCLAW_GATEWAY_BIND=0.0.0.0
     volumes:
       - ${DATA_ROOT}/openclaw:/home/node/.openclaw
