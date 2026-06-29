@@ -17,6 +17,10 @@ services:
     container_name: ai-ollama
     restart: unless-stopped
     networks: [aistack]
+    environment:
+      # Keep the model loaded in RAM/VRAM so agent requests don't pay reload cost
+      # every time (the main CPU latency killer). -1 = never unload.
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:--1}
     volumes:
       - ${DATA_ROOT}/ollama:/root/.ollama
     healthcheck:
@@ -93,6 +97,11 @@ services:
       # Bind to all interfaces inside the container so Traefik (or the published
       # port) can reach the gateway; it defaults to 127.0.0.1 otherwise.
       - OPENCLAW_GATEWAY_BIND=0.0.0.0
+      # Pre-wire the local SearXNG so the agent's web_search works out of the box
+      # (service name + internal port; SearXNG already has JSON format enabled).
+      - SEARXNG_BASE_URL=http://searxng:8080
+      # Discord bot token (empty unless set via `./install.sh discord`).
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
     volumes:
       - ${DATA_ROOT}/openclaw:/home/node/.openclaw
     labels:

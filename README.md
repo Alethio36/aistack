@@ -112,6 +112,21 @@ sudo ./install.sh exec openclaw models status
 sudo ./install.sh exec openclaw doctor
 ```
 
+**Discord** (the easiest way to drive OpenClaw — no dashboard/secure-context needed,
+since the bot connection is outbound):
+
+```bash
+sudo ./install.sh discord                     # prints a step-by-step bot walkthrough,
+                                              # takes your token, wires + restarts OpenClaw
+```
+
+Then DM the bot (or @mention it on your server) and approve the pairing prompt.
+
+**Web search (SearXNG)** is pre-wired: the agent's `web_search` tool points at the
+bundled SearXNG via `SEARXNG_BASE_URL=http://searxng:8080` (service name, not
+localhost), with JSON output already enabled. If the onboarding wizard asks for a
+SearXNG base URL, that's the value — but you shouldn't need to set it.
+
 ## GPU — host prerequisites (you install these; the script won't)
 
 The installer detects NVIDIA / AMD / none, asks if unsure, and **probes whether
@@ -148,6 +163,38 @@ never falls back to CPU silently.
 
 Multiple GPUs: defaults to all visible. Pin a subset with `OLLAMA_GPU_COUNT` /
 `NVIDIA_VISIBLE_DEVICES` (NVIDIA) in `.env`.
+
+## Where everything lives on the host
+
+Two locations: the **repo** (code) and **`DATA_ROOT`** (everything persistent).
+
+```
+<repo>/                       # the git clone — code only
+  install.sh, compose*.yaml, config/*.tmpl
+  .env                        # generated, secrets, gitignored
+  install.log, .image-digests/
+
+$DATA_ROOT/                   # default: /opt/local-ai-stack/data  (outside the clone)
+  ollama/                     # downloaded models (the big one — tens of GB)
+  open-webui/                 # users, chats, settings (sqlite)
+  openclaw/                   # openclaw.json, state, workspace, logs
+  litellm/config.yaml
+  searxng/settings.yml
+```
+
+`DATA_ROOT` is **configurable**: set it at install with `--data-root /path`, or edit
+`DATA_ROOT` in `.env`. Keep it on a disk with room for models, and on a fast disk
+(local SSD/NVMe) if you can — model load time depends on it. Changing `DATA_ROOT`
+after install means moving the existing directory there first, or the stack starts
+empty (models re-download).
+
+## Performance note (CPU especially)
+
+Ollama is set to keep the model resident (`OLLAMA_KEEP_ALIVE=-1`) so agent requests
+don't pay a reload penalty each time — the main cause of OpenClaw timeouts on CPU.
+Even so, an agent loop on CPU is slow; if OpenClaw still times out, drop to a smaller
+model (`llama3.2:1b`) or move to a GPU. Set `OLLAMA_KEEP_ALIVE=30m` in `.env` if you'd
+rather free RAM when idle.
 
 ## Updates
 

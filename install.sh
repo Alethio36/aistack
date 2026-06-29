@@ -21,6 +21,7 @@ FORCE_GPU=""
 CLI_DATA_ROOT=""
 FORCE_WT=""
 FORCE_PROXY=""
+FORCE_TOKEN=""
 EXEC_ARGS=()
 GPU_VENDOR=""
 GPU_INFO=""
@@ -43,6 +44,7 @@ Commands:
   update             Record current image IDs, then pull+recreate (incl. OpenClaw)
   reconfigure-gpu    Re-detect/choose GPU and recreate Ollama
   reconfigure-proxy  Change proxy mode (none/openclaw/all) and re-apply
+  discord            Guided Discord bot setup (instructions + token + wiring)
   exec [svc] [cmd]   Exec into a service (default: shell in the OpenClaw container)
   onboard [args]     Run OpenClaw onboarding inside its container
   down               Stop the stack
@@ -52,6 +54,7 @@ Commands:
 Options:
   --gpu nvidia|amd|cpu   Skip detection and force acceleration mode
   --proxy none|openclaw|all  Set reverse-proxy mode non-interactively
+  --token <BOT_TOKEN>    Discord bot token for non-interactive `discord`
   --data-root PATH       Override DATA_ROOT (where models/data live)
   --watchtower CRON      Set Watchtower schedule non-interactively (6-field cron)
   --yes, -y              Non-interactive (accept detected/default choices)
@@ -482,6 +485,61 @@ cmd_onboard() {
   fi
 }
 
+# Guided Discord channel setup: instructions, token capture, wiring, restart.
+cmd_discord() {
+  preflight; init_env; build_compose_cmd
+  cat <<'EOF'
+
+── Connect OpenClaw to Discord ────────────────────────────────────────────────
+Create a bot (≈5 min), then paste its token below.
+
+  1. https://discord.com/developers/applications  ->  New Application  ->  name it
+  2. Left sidebar -> Bot. Under "Privileged Gateway Intents" enable:
+       - Message Content Intent   (REQUIRED — without it the bot ignores messages)
+       - Server Members Intent    (recommended)
+  3. Still on Bot: click "Reset Token" -> Copy it (that's what you paste here).
+  4. Left sidebar -> OAuth2 -> URL Generator. Scopes: tick  bot  +  applications.commands
+       Bot Permissions: tick  View Channels, Send Messages, Read Message History
+       (do NOT grant Administrator). Copy the URL at the bottom.
+  5. Open that URL, choose YOUR server (make a private one if needed), Authorize.
+────────────────────────────────────────────────────────────────────────────────
+EOF
+  local token=""
+  if [ -n "$FORCE_TOKEN" ]; then
+    token="$FORCE_TOKEN"
+  elif [ "$ASSUME_YES" -eq 1 ] || [ ! -t 0 ]; then
+    die "Non-interactive: pass the token with --token <BOT_TOKEN>."
+  else
+    printf 'Paste your Discord Bot Token (blank to abort): '
+    read -r token || true
+  fi
+  [ -n "$token" ] || { warn "No token — Discord setup aborted."; return 0; }
+
+  set_kv DISCORD_BOT_TOKEN "$token"
+  local data_root cfg; data_root="$(get_kv DATA_ROOT)"; data_root="${data_root%/}"
+  cfg="$data_root/openclaw/openclaw.json"
+  python3 - "$cfg" <<'PY' || die "Could not enable the Discord channel in openclaw.json."
+import json, sys
+p = sys.argv[1]; c = json.load(open(p))
+d = c.setdefault("channels", {}).setdefault("discord", {})
+d["enabled"] = True
+d["token"] = {"source": "env", "provider": "default", "id": "DISCORD_BOT_TOKEN"}
+json.dump(c, open(p, "w"), indent=2)
+print("Discord channel enabled in openclaw.json")
+PY
+  info "Recreating OpenClaw with the Discord token…"
+  dc up -d --force-recreate openclaw
+  cat <<'EOF'
+
+Discord wired. Final steps (in Discord):
+  - DM your bot, or @mention it in a channel on your server.
+  - Approve the pairing request it sends (first contact only).
+  - Guild messages are mention-gated by default — @mention the bot to get a reply.
+Check status:  sudo ./install.sh exec openclaw openclaw channels status
+EOF
+  ok "Discord setup complete."
+}
+
 cmd_down()   { preflight; init_env; build_compose_cmd; dc down; ok "Stopped."; }
 cmd_logs()   { preflight; init_env; build_compose_cmd; dc logs -f; }
 cmd_status() { preflight; init_env; build_compose_cmd; dc ps; echo; verify_perms; }
@@ -489,7 +547,7 @@ cmd_status() { preflight; init_env; build_compose_cmd; dc ps; echo; verify_perms
 # ── arg parsing + dispatch ──────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
   case "$1" in
-    install|update|down|status|logs|reconfigure-gpu|reconfigure-proxy)
+    install|update|down|status|logs|reconfigure-gpu|reconfigure-proxy|discord)
       SUBCMD="$1"; shift ;;
     exec|onboard)
       SUBCMD="$1"; shift; EXEC_ARGS=("$@"); break ;;   # rest is verbatim service/cmd
@@ -497,6 +555,7 @@ while [ $# -gt 0 ]; do
     --data-root)  CLI_DATA_ROOT="${2:-}"; shift 2 ;;
     --watchtower) FORCE_WT="${2:-}"; shift 2 ;;
     --proxy)      FORCE_PROXY="${2:-}"; shift 2 ;;
+    --token)      FORCE_TOKEN="${2:-}"; shift 2 ;;
     --yes|-y)     ASSUME_YES=1; shift ;;
     -h|--help)    usage; exit 0 ;;
     *) die "Unknown argument: $1 (see --help)" ;;
@@ -509,6 +568,7 @@ case "$SUBCMD" in
   update)           cmd_update ;;
   reconfigure-gpu)  cmd_reconfigure_gpu ;;
   reconfigure-proxy) cmd_reconfigure_proxy ;;
+  discord)          cmd_discord ;;
   exec)             cmd_exec ;;
   onboard)          cmd_onboard ;;
   down)             cmd_down ;;
