@@ -9,6 +9,7 @@
         "baseUrl": "http://litellm:4000/v1",
         "apiKey": "@@LITELLM_MASTER_KEY@@",
         "api": "openai-completions",
+        "timeoutSeconds": 300,
         "models": [
           {
             "id": "@@DEFAULT_MODEL@@",
@@ -19,6 +20,9 @@
         ]
       }
     }
+  },
+  "tools": {
+    "profile": "@@TOOLS_PROFILE@@"
   },
   "agents": {
     "defaults": {

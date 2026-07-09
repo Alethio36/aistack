@@ -281,12 +281,17 @@ choose_proxy() {
 
 # ── config rendering (generate-if-absent) ───────────────────────────────────
 render_configs() {
-  local data_root lk sx dm
+  local data_root lk sx dm tools_profile
   data_root="$(get_kv DATA_ROOT)"; data_root="${data_root%/}"
   [ -n "$data_root" ] || die "DATA_ROOT is empty in .env."
   lk="$(get_kv LITELLM_MASTER_KEY)"
   sx="$(get_kv SEARXNG_SECRET)"
   dm="$(get_kv DEFAULT_MODEL)"
+  # Tool profile: 'minimal' on CPU (the agentic tool loop is unusably slow without
+  # a GPU), 'coding' on GPU where tools are viable. Override later with:
+  #   ./install.sh exec openclaw openclaw config set tools.profile full
+  tools_profile="minimal"
+  case "$(get_kv GPU_VENDOR)" in nvidia|amd) tools_profile="coding" ;; esac
 
   install -d "$data_root/litellm" "$data_root/searxng" "$data_root/openclaw"
 
@@ -297,6 +302,7 @@ render_configs() {
     sed -e "s|@@LITELLM_MASTER_KEY@@|${lk}|g" \
         -e "s|@@SEARXNG_SECRET@@|${sx}|g" \
         -e "s|@@DEFAULT_MODEL@@|${dm}|g" \
+        -e "s|@@TOOLS_PROFILE@@|${tools_profile}|g" \
         "$1" > "$_tmp"
     mv "$_tmp" "$2"
     ok "Rendered $(basename "$2")."
@@ -516,6 +522,9 @@ EOF
   [ -n "$token" ] || { warn "No token — Discord setup aborted."; return 0; }
 
   set_kv DISCORD_BOT_TOKEN "$token"
+  info "Installing the OpenClaw Discord plugin…"
+  dc exec openclaw openclaw plugins install @openclaw/discord \
+    || warn "Plugin install failed — run it manually: sudo ./install.sh exec openclaw openclaw plugins install @openclaw/discord"
   local data_root cfg; data_root="$(get_kv DATA_ROOT)"; data_root="${data_root%/}"
   cfg="$data_root/openclaw/openclaw.json"
   python3 - "$cfg" <<'PY' || die "Could not enable the Discord channel in openclaw.json."
@@ -524,8 +533,11 @@ p = sys.argv[1]; c = json.load(open(p))
 d = c.setdefault("channels", {}).setdefault("discord", {})
 d["enabled"] = True
 d["token"] = {"source": "env", "provider": "default", "id": "DISCORD_BOT_TOKEN"}
+allow = c.setdefault("plugins", {}).setdefault("allow", [])
+if "discord" not in allow:
+    allow.append("discord")          # explicitly trust the plugin (no auto-load warning)
 json.dump(c, open(p, "w"), indent=2)
-print("Discord channel enabled in openclaw.json")
+print("Discord channel enabled + plugin trusted in openclaw.json")
 PY
   info "Recreating OpenClaw with the Discord token…"
   dc up -d --force-recreate openclaw

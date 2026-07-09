@@ -1,82 +1,78 @@
 SESSION SUMMARY — local-ai-stack
-Updated: 2026-06-28 (Adelaide)
-Repo: github.com/alethio36/aistack
+Updated: 2026-07-09 (Adelaide)
+Repo: github.com/alethio36/aistack   PoC VM: Debian "nextcloud" @ 10.11.22.57 (CPU, 6 cores)
 
 ================================================================================
 WHAT THIS IS
 ================================================================================
-Clone-and-run Docker Compose local AI stack:
-  Ollama -> LiteLLM -> Open WebUI + OpenClaw -> SearXNG, optional Traefik proxy.
-Idempotent install.sh: detects GPU, picks proxy/TLS mode, renders per-host config
-+ secrets, sets bind-mount perms, prompts Watchtower frequency, auto-updates.
-Built to run on CLEAN hosts with no pre-existing infrastructure.
+Clone-and-run Docker Compose local AI stack, built for CLEAN hosts (no assumed infra):
+  Ollama -> LiteLLM -> Open WebUI + OpenClaw -> SearXNG, optional bundled Traefik (TLS).
+Installer detects GPU, picks proxy/TLS + tools profile, renders per-host config +
+secrets, sets bind-mount perms, wires SearXNG/Discord, auto-updates via Watchtower.
 
 ================================================================================
-CURRENT STATE
+CURRENT STATE — WORKING END TO END (PoC proven)
 ================================================================================
-WORKING
-- Full stack comes up. Tested on the CPU-only Debian VM @ 10.11.22.57.
-- Installer flow: GPU detect/prompt/probe, generate-once secrets, atomic render,
-  Watchtower frequency prompt, proxy-mode prompt, exec/onboard helpers.
+- Full stack up. OpenClaw responds in Discord on the CPU box.
+- Proven live: Ollama -> LiteLLM -> OpenClaw chain returns 200s; Discord bot
+  connects and replies; Traefik/HTTPS path exists for the dashboard.
+- Honest number: ~130s per reply on qwen2.5:0.5b / 6-core CPU. That's the CPU;
+  architecture is sound and latency collapses on the target GPU machine. Clean
+  PoC boundary — nothing structural faked, just underpowered.
 
-RESOLVED THIS SESSION (was the big blocker)
-- OpenClaw Control UI would not load over plain HTTP from a remote browser
-  (browser secure-context rule; allowInsecureAuth / dangerouslyDisableDeviceAuth
-  are BOTH ineffective for remote LAN HTTP — confirmed against the OpenClaw bug
-  tracker). Fix = provide a real HTTPS secure context, self-contained:
-  -> Bundled Traefik with a self-signed cert (Traefik default TLS). No external
-     DNS / domain / CA needed; works by raw IP. Each fronted service gets its own
-     HTTPS entrypoint/port (no Host rules), so it's portable to any clean box.
+================================================================================
+OPENCLAW TUNING — the hard-won correct keys (this version = 2026.6.11)
+================================================================================
+- Idle/timeout watchdog is PER-PROVIDER, not global:
+    models.providers.litellm.timeoutSeconds = 300     (CORRECT)
+    agents.defaults.llm.idleTimeoutSeconds            (WRONG — schema rejects
+      "llm"; this exact key BOOT-LOOPED the gateway. Do not use. Old guides cite it.)
+- tools.profile controls the agent tool loop. Allowed: minimal|coding|messaging|full.
+  "coding" (the prior default) made a plain "hi" fire web_fetch etc → multi-call
+  loop → timeouts on CPU. Set to "minimal" for CPU.
+- Installer now auto-sets tools.profile from GPU: cpu/none -> minimal, gpu -> coding.
+- Discord is an external PLUGIN: needs `openclaw plugins install @openclaw/discord`
+  (installer's `discord` command now does this) + channels.discord.enabled +
+  token {source:env,id:DISCORD_BOT_TOKEN} + plugins.allow:["discord"].
+- SearXNG base URL inside the stack = http://searxng:8080 (pre-wired via
+  SEARXNG_BASE_URL; NOT localhost/8888).
+- Config edits: ALWAYS use `openclaw config set <path> <val>` — it validates
+  before writing, so a bad key errors instead of boot-looping. Hand-editing the
+  JSON is what caused the boot loops.
 
-KEY DESIGN DECISIONS
-- Earlier homelab-specific fix (Caddy LXC + *.true-frontier.com wildcard +
-  split-horizon DNS) was REJECTED — stack must not assume host infra. Traefik-
-  in-stack with self-signed TLS is the portable replacement.
-- Base compose publishes NO user-facing ports; overlays add them (Compose can't
-  remove a port via overlay, so ports must be additive). Overlays:
-    compose.direct-webui / direct-openclaw  (plain HTTP)
-    compose.proxy-base                       (Traefik service)
-    compose.front-webui / front-openclaw     (Traefik HTTPS routers + ports)
-- PROXY_MODE = none | openclaw | all  (installer prompt, --proxy flag, or
-  reconfigure-proxy). openclaw mode = HTTPS dashboard for OpenClaw, WebUI direct.
-
-ALL EARLIER FIXES (still in the files)
-- set -e abort in init_env (trailing &&) -> if-blocks
-- render sed left zero-byte files -> atomic mktemp+mv + [-s] + template check
-- config/*.tmpl under config/ (download had flattened it)
-- OpenClaw image -> ghcr.io/openclaw/openclaw:latest (the Docker Hub one is fake)
-- OPENCLAW_GATEWAY_BIND=0.0.0.0
-- gateway.mode=local in openclaw.json.tmpl (gateway refused to start without it)
-- Watchtower -> nickfedor/watchtower:latest (containrrr abandoned/broke)
-- default model -> qwen2.5:1.5b (CPU-safe) + README sizing guide
+================================================================================
+FIXES ROLLED INTO THE REPO THIS SESSION
+================================================================================
+- config/openclaw.json.tmpl: removed the invalid agents.defaults.llm block (boot
+  loop); added models.providers.litellm.timeoutSeconds=300; added tools.profile
+  (@@TOOLS_PROFILE@@, GPU-driven); kept gateway.mode=local.
+- install.sh: render_configs computes tools_profile from GPU_VENDOR; `discord`
+  command installs the plugin + sets plugins.allow.
+- compose.yaml: OLLAMA_KEEP_ALIVE=-1; SEARXNG_BASE_URL + DISCORD_BOT_TOKEN on
+  OpenClaw.
+- .env.example: OLLAMA_KEEP_ALIVE, DISCORD_BOT_TOKEN, DEFAULT_MODEL=qwen2.5:1.5b.
+- (All earlier fixes still in: GHCR OpenClaw image, gateway.mode, gateway bind,
+  nickfedor watchtower, atomic render, config/ layout, Traefik proxy overlays,
+  exec/onboard/discord/reconfigure-proxy subcommands.)
 
 ================================================================================
 NEXT STEPS
 ================================================================================
-1. Push these files; on the VM, sync and re-run with a proxy mode:
-     git fetch origin && git reset --hard origin/main   # .env is gitignored, survives
-     chmod +x install.sh
-     sudo ./install.sh --proxy openclaw                  # or run interactive
-   Then open  https://10.11.22.57:18443/#token=<OPENCLAW_GATEWAY_TOKEN from .env>
-   (accept the self-signed cert warning once).  <-- this is the previously-broken
-   dashboard; verify it actually loads now.
-2. Pull qwen2.5:1.5b in Open WebUI (Settings -> Models), test chat.
-3. Onboard OpenClaw:  sudo ./install.sh onboard   (add messaging channel + pair)
-   Verify model route: sudo ./install.sh exec openclaw models status
-
-OPEN / TO VERIFY
-- traefik:v3 tag pulls cleanly (floating major tag — pin a minor in .env if not).
-- The self-signed-HTTPS path genuinely satisfies OpenClaw's secure-context check
-  end to end (logic is sound from the bug tracker; confirm live).
-- trustedProxies default is 172.16.0.0/12 (Docker bridge range). If OpenClaw
-  still flags the proxied connection as remote, narrow/adjust to the actual
-  bridge subnet (docker network inspect ai-stack_aistack).
+- Push repo; on VM: git fetch && git reset --hard origin/main; chmod +x install.sh.
+  (Live box is already hand-tuned to match the new template; a fresh install now
+  reproduces the working config automatically.)
+- Optional cleanups on the live box:
+    openclaw config set plugins.allow '["discord"]'   (already folded into `discord` cmd)
+    docker rm -f ai-traefik   (orphan — only if not using the proxy right now)
+- On the TARGET (GPU) machine: install detects GPU -> tools.profile=coding, and a
+  real model (qwen2.5:7b+) — OpenClaw becomes fast + fully agentic. That's the PoC payoff.
 
 ================================================================================
 KEY PATHS / FACTS
 ================================================================================
 - VM clone: ~/local-ai-stack   DATA_ROOT: /opt/local-ai-stack/data (outside clone)
 - Live OpenClaw config: /opt/local-ai-stack/data/openclaw/openclaw.json
-- docker needs sudo on this VM (user not in docker group).
+- docker needs sudo on this VM.
 - Recreate one service: sudo docker compose --env-file .env -f compose.yaml [overlays] up -d --force-recreate <svc>
-- Helpers: ./install.sh exec [svc] [cmd] ;  ./install.sh onboard ;  ./install.sh reconfigure-proxy
+  (include proxy overlays or use ./install.sh, else Traefik shows as orphan.)
+- Helpers: ./install.sh {exec [svc] [cmd] | onboard | discord | reconfigure-proxy | reconfigure-gpu}

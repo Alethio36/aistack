@@ -190,11 +190,23 @@ empty (models re-download).
 
 ## Performance note (CPU especially)
 
-Ollama is set to keep the model resident (`OLLAMA_KEEP_ALIVE=-1`) so agent requests
-don't pay a reload penalty each time — the main cause of OpenClaw timeouts on CPU.
-Even so, an agent loop on CPU is slow; if OpenClaw still times out, drop to a smaller
-model (`llama3.2:1b`) or move to a GPU. Set `OLLAMA_KEEP_ALIVE=30m` in `.env` if you'd
-rather free RAM when idle.
+OpenClaw is an *agent*, not a chatbot — with a full tool profile, one message can
+trigger multiple model calls (plan → tool → reason). On CPU that's brutal. Two
+defaults handle this:
+
+- **`tools.profile`** is set from GPU detection: `minimal` on CPU (single model
+  call per message — responsive), `coding` on GPU (tools viable). Bump it anytime:
+  `./install.sh exec openclaw openclaw config set tools.profile full`.
+- **`models.providers.litellm.timeoutSeconds: 300`** raises OpenClaw's idle
+  watchdog above the implicit ~120s, so a slow first token on a cold CPU model
+  doesn't false-abort. (This is the correct per-provider key — *not*
+  `agents.defaults.llm`, which older guides cite and which this version rejects.)
+
+Ollama also keeps the model resident (`OLLAMA_KEEP_ALIVE=-1`) to avoid reload cost.
+Even so: on CPU expect tens of seconds to minutes per reply. For a real agent,
+use a GPU or route OpenClaw's model to a hosted provider via LiteLLM. Open WebUI
+chat is unaffected — the local model is fine there; it's the agent loop that's
+CPU-bound.
 
 ## Updates
 
